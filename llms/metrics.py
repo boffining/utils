@@ -189,23 +189,52 @@ def calculate_forgetting_rate(model: AutoModelForCausalLM, tokenizer: AutoTokeni
     forgetting_rate = sum(differences) / len(prompts) * 100
     return forgetting_rate
 
-def calculate_brevity_score(predictions: List[str], references: List[str]) -> Dict:
+# def calculate_brevity_score(predictions: List[str], references: List[str]) -> Dict:
+#     """
+#     Calculate Brevity Score to evaluate concise text generation.
+
+#     Args:
+#         predictions (List[str]): A list of predicted texts from the model.
+#         references (List[str]): A list of reference texts (ground truth).
+
+#     Returns:
+#         Dict: Brevity score.
+
+#     Resource:
+#         https://arxiv.org/pdf/1904.09675.pdf
+#     """
+#     brevity_ratios = [len(pred.split()) / max(len(ref.split()), 1) for pred, ref in zip(predictions, references)]
+#     brevity_score = np.mean([min(1.0, ratio) for ratio in brevity_ratios])
+#     return {"brevity_score": brevity_score}
+
+def calculate_brevity_score(reference: str, generated: str) -> float:
     """
-    Calculate Brevity Score to evaluate concise text generation.
+    Calculate the brevity score for the generated text compared to the reference.
 
     Args:
-        predictions (List[str]): A list of predicted texts from the model.
-        references (List[str]): A list of reference texts (ground truth).
+        reference (str): The reference text.
+        generated (str): The generated text.
 
     Returns:
-        Dict: Brevity score.
-
+        float: The brevity score (closer to 1 is better).
+        
     Resource:
         https://arxiv.org/pdf/1904.09675.pdf
     """
-    brevity_ratios = [len(pred.split()) / max(len(ref.split()), 1) for pred, ref in zip(predictions, references)]
-    brevity_score = np.mean([min(1.0, ratio) for ratio in brevity_ratios])
-    return {"brevity_score": brevity_score}
+    # Tokenize the reference and generated text
+    reference_length = len(reference.split())
+    generated_length = len(generated.split())
+
+    if generated_length == 0:
+        raise ValueError("Generated text has zero tokens, cannot calculate brevity score.")
+
+    # Brevity penalty: e^1 - (reference_length / generated_length) if generated text is shorter
+    brevity_penalty = 1.0
+    if generated_length < reference_length:
+        brevity_penalty = reference_length / generated_length
+
+    brevity_score = brevity_penalty
+    return brevity_score
 
 def calculate_perplexity(probabilities: List[float]) -> float:
     """
