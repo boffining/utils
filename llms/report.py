@@ -1,8 +1,9 @@
 import time
-import torch
+from typing import Dict, Any, List
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from pynvml import nvmlInit, nvmlDeviceGetCount, nvmlDeviceGetHandleByIndex, nvmlDeviceGetName
 from utils import (
+    get_device,
+    get_hardware_info,
     evaluate_latency_throughput,
     evaluate_power_efficiency,
     compare_precision_accuracy,
@@ -15,23 +16,7 @@ from metrics import (
     calculate_mean_reciprocal_rank,
     calculate_mean_average_precision,
 )
-
-
-def get_hardware_info() -> dict:
-    """
-    Gather hardware details about the system used for evaluation.
-
-    Returns:
-        dict: A dictionary containing the number of GPUs, GPU types, and whether CUDA is available.
-    """
-    nvmlInit()
-    gpu_count = nvmlDeviceGetCount()
-    gpu_info = [nvmlDeviceGetName(nvmlDeviceGetHandleByIndex(i)).decode() for i in range(gpu_count)]
-    return {
-        "num_gpus": gpu_count,
-        "gpu_types": gpu_info,
-        "cuda_available": torch.cuda.is_available(),
-    }
+from pynvml import nvmlInit, nvmlDeviceGetCount, nvmlDeviceGetHandleByIndex, nvmlDeviceGetName
 
 
 def evaluate_model(
@@ -88,10 +73,14 @@ def evaluate_model(
     """
     report = {"model_name": model_name, "evaluation_results": {}, "conditions": {}}
 
+    # Detect device
+    device = get_device()
+    print(f"Using device: {device}")
+
     # Load model and tokenizer
     print(f"Loading model: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name).to("cuda" if torch.cuda.is_available() else "cpu")
+    model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
 
     # Hardware information
     hardware_info = get_hardware_info()
@@ -103,7 +92,7 @@ def evaluate_model(
         "sequence_lengths": sequence_lengths,
         "num_gpus": hardware_info["num_gpus"],
         "gpu_types": hardware_info["gpu_types"],
-        "cuda_available": hardware_info["cuda_available"],
+        "device": hardware_info["device"],
         "model_parameters": model_parameters,
         "quantized": quantized,
     }
@@ -121,7 +110,7 @@ def evaluate_model(
         }
 
     # Power efficiency evaluation
-    if evaluate_power:
+    if evaluate_power and device.type == "cuda":
         print("Evaluating power efficiency...")
         power_consumed, energy_per_token = evaluate_power_efficiency(
             model, tokenizer, prompt, max_tokens, batch_size
@@ -130,6 +119,8 @@ def evaluate_model(
             "power_consumed": power_consumed,
             "energy_per_token": energy_per_token,
         }
+    elif evaluate_power:
+        print("Power efficiency evaluation is only supported on CUDA devices.")
 
     # Precision comparison
     if evaluate_precision:

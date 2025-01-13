@@ -1,207 +1,216 @@
-"""
-utils.py
-
-This module contains utilities for evaluating the performance of large language models (LLMs) using
-metrics such as latency, throughput, power consumption, memory usage, and precision comparison.
-It is designed for use with Hugging Face's open-source LLMs, including models like Llama 2 7B.
-
-Requirements:
-- transformers
-- torch
-- pynvml
-
-Install dependencies:
-    pip install transformers torch pynvml
-
-"""
-
 import time
 import torch
+from typing import Tuple, Dict, Any
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetPowerUsage, nvmlDeviceGetMemoryInfo
-from typing import Tuple, List
 
-# Initialize NVIDIA Management Library
-nvmlInit()
-gpu_handle = nvmlDeviceGetHandleByIndex(0)
-
-# Helper functions
-def track_power() -> float:
-    """Track GPU power consumption in watts."""
-    return nvmlDeviceGetPowerUsage(gpu_handle) / 1000
-
-def track_memory() -> float:
-    """Track GPU memory usage in GB."""
-    mem_info = nvmlDeviceGetMemoryInfo(gpu_handle)
-    return mem_info.used / (1024 ** 3)
-
-def count_model_parameters(model: torch.nn.Module) -> int:
-    """Count the total number of parameters in the model."""
-    return sum(p.numel() for p in model.parameters())
-
-class LLMPerformanceTester:
+# Device Detection
+def get_device() -> torch.device:
     """
-    A utility class for evaluating the performance of Hugging Face LLMs.
+    Detect the device for computation.
 
-    Attributes:
-        model_name (str): The Hugging Face model name to load.
-        tokenizer: The tokenizer associated with the model.
-        model: The LLM model loaded from Hugging Face.
-        device (str): Device to run the model on ('cuda' or 'cpu').
-        parameter_count (int): Number of parameters in the model.
+    Returns:
+        torch.device: The detected device ('cuda', 'mps', or 'cpu').
     """
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
+    
+def get_hardware_info() -> dict:
+    """
+    Gather hardware details about the system used for evaluation.
 
-    def __init__(self, model_name: str):
-        self.model_name = model_name
-        print(f"Loading model: {model_name}")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name).to("cuda" if torch.cuda.is_available() else "cpu")
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.parameter_count = count_model_parameters(self.model)
-        print(f"Model Size: {self.parameter_count:,} parameters")
+    Returns:
+        dict: A dictionary containing the number of GPUs, GPU types, and whether CUDA is available.
+    """
+    device = get_device()
+    if device.type == "cuda":
+        nvmlInit()
+        gpu_count = nvmlDeviceGetCount()
+        gpu_info = [nvmlDeviceGetName(nvmlDeviceGetHandleByIndex(i)).decode() for i in range(gpu_count)]
+        return {
+            "num_gpus": gpu_count,
+            "gpu_types": gpu_info,
+            "device": device.type,
+        }
+    elif device.type == "mps":
+        return {
+            "num_gpus": 1,
+            "gpu_types": ["Apple M1/M2/M3 (Metal Performance Shaders)"],
+            "device": device.type,
+        }
+    else:
+        return {
+            "num_gpus": 0,
+            "gpu_types": ["CPU"],
+            "device": device.type,
+        }
 
-    def evaluate_latency_throughput(self, prompt: str, max_tokens: int = 50, batch_size: int = 1) -> Tuple[torch.Tensor, float, float, float]:
-        """
-        Evaluate latency, token throughput, and token processing rate.
+def evaluate_latency_throughput(
+    model: Any, tokenizer: Any, prompt: str, max_tokens: int = 50, batch_size: int = 1
+) -> Tuple[Any, float, float, float]:
+    """
+    Evaluate latency and throughput of the model.
 
-        Args:
-            prompt (str): Input prompt for the model.
-            max_tokens (int): Maximum number of tokens to generate.
-            batch_size (int): Number of prompts in a batch.
+    Args:
+        model (Any): The Hugging Face model instance.
+        tokenizer (Any): The Hugging Face tokenizer instance.
+        prompt (str): The input prompt for evaluation.
+        max_tokens (int): The maximum number of tokens to generate.
+        batch_size (int): Batch size for evaluation.
 
-        Returns:
-            Tuple[torch.Tensor, float, float, float]: Generated outputs, latency, throughput, and token throughput.
-        """
-        inputs = [prompt] * batch_size
-        tokenized_inputs = self.tokenizer(inputs, return_tensors="pt", padding=True).to(self.device)
+    Returns:
+        Tuple[Any, float, float, float]: Outputs, latency, throughput, and token throughput.
+    """
+    device = get_device()
+    model = model.to(device)
 
-        # Warm-up
-        print("Warming up...")
-        start_warmup = time.time()
-        self.model.generate(**tokenized_inputs, max_new_tokens=max_tokens)
-        end_warmup = time.time()
-        warmup_time = end_warmup - start_warmup
-        print(f"Warm-up Time: {warmup_time:.2f}s")
+    # Prepare inputs
+    inputs = [prompt] * batch_size
+    tokenized_inputs = tokenizer(inputs, return_tensors="pt", padding=True).to(device)
 
-        # Measure latency and throughput
-        print("Measuring latency and throughput...")
-        start_time = time.time()
-        outputs = self.model.generate(**tokenized_inputs, max_new_tokens=max_tokens)
-        end_time = time.time()
+    # Warm-up
+    print("Warming up...")
+    start_warmup = time.time()
+    model.generate(**tokenized_inputs, max_new_tokens=max_tokens)
+    end_warmup = time.time()
+    warmup_time = end_warmup - start_warmup
+    print(f"Warm-up Time: {warmup_time:.2f}s")
 
-        latency = end_time - start_time
-        throughput = batch_size / latency
-        total_tokens = max_tokens * batch_size
-        token_throughput = total_tokens / latency
-        print(f"Latency: {latency:.2f}s | Throughput: {throughput:.2f} responses/sec | Token Throughput: {token_throughput:.2f} tokens/sec")
-        return outputs, latency, throughput, token_throughput
+    # Measure latency and throughput
+    print("Measuring latency and throughput...")
+    start_time = time.time()
+    outputs = model.generate(**tokenized_inputs, max_new_tokens=max_tokens)
+    end_time = time.time()
 
-    def evaluate_power_efficiency(self, prompt: str, max_tokens: int = 50, batch_size: int = 1) -> Tuple[float, float]:
-        """
-        Evaluate power consumption and efficiency per token.
+    latency = end_time - start_time
+    throughput = batch_size / latency
+    total_tokens = max_tokens * batch_size
+    token_throughput = total_tokens / latency
+    print(f"Latency: {latency:.2f}s | Throughput: {throughput:.2f} responses/sec | Token Throughput: {token_throughput:.2f} tokens/sec")
+    return outputs, latency, throughput, token_throughput
 
-        Args:
-            prompt (str): Input prompt for the model.
-            max_tokens (int): Maximum number of tokens to generate.
-            batch_size (int): Number of prompts in a batch.
 
-        Returns:
-            Tuple[float, float]: Total power consumed and energy per token.
-        """
-        inputs = [prompt] * batch_size
-        tokenized_inputs = self.tokenizer(inputs, return_tensors="pt", padding=True).to(self.device)
+def evaluate_power_efficiency(
+    model: Any, tokenizer: Any, prompt: str, max_tokens: int = 50, batch_size: int = 1
+) -> Tuple[float, float]:
+    """
+    Evaluate power efficiency (works only on CUDA devices).
 
-        # Warm-up
-        print("Warming up...")
-        self.model.generate(**tokenized_inputs, max_new_tokens=max_tokens)
+    Args:
+        model (Any): The Hugging Face model instance.
+        tokenizer (Any): The Hugging Face tokenizer instance.
+        prompt (str): The input prompt for evaluation.
+        max_tokens (int): The maximum number of tokens to generate.
+        batch_size (int): Batch size for evaluation.
 
-        # Measure power and efficiency
-        print("Measuring power efficiency...")
-        power_start = track_power()
-        start_time = time.time()
+    Returns:
+        Tuple[float, float]: Power consumed and energy per token.
+    """
+    device = get_device()
+    if device.type != "cuda":
+        print("Power efficiency evaluation is only supported on CUDA devices.")
+        return 0.0, 0.0
 
-        self.model.generate(**tokenized_inputs, max_new_tokens=max_tokens)
+    from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetPowerUsage
 
-        end_time = time.time()
-        power_end = track_power()
+    nvmlInit()
+    gpu_handle = nvmlDeviceGetHandleByIndex(0)
 
-        latency = end_time - start_time
-        throughput = batch_size / latency
-        power_consumed = (power_end - power_start) * latency
-        total_tokens = max_tokens * batch_size
-        energy_per_token = power_consumed / total_tokens if total_tokens > 0 else float('inf')
+    def track_power():
+        """Track GPU power consumption in watts."""
+        return nvmlDeviceGetPowerUsage(gpu_handle) / 1000
 
-        print(f"Power Consumption: {power_consumed:.2f} W | Energy per Token: {energy_per_token:.4f} W/token")
-        return power_consumed, energy_per_token
+    model = model.to(device)
+    inputs = [prompt] * batch_size
+    tokenized_inputs = tokenizer(inputs, return_tensors="pt", padding=True).to(device)
 
-    def compare_precision_accuracy(self, prompt: str, max_tokens: int = 50) -> bool:
-        """
-        Compare outputs for fp32 and fp16 precision to test integrity.
+    # Warm-up
+    print("Warming up...")
+    model.generate(**tokenized_inputs, max_new_tokens=max_tokens)
 
-        Args:
-            prompt (str): Input prompt for the model.
-            max_tokens (int): Maximum number of tokens to generate.
+    # Measure power and efficiency
+    print("Measuring power efficiency...")
+    power_start = track_power()
+    start_time = time.time()
 
-        Returns:
-            bool: Whether the outputs match between fp32 and fp16 precisions.
-        """
-        # Full precision (fp32)
-        model_fp32 = AutoModelForCausalLM.from_pretrained(self.model_name).to(self.device)
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-        output_fp32 = model_fp32.generate(**inputs, max_new_tokens=max_tokens)
-        text_fp32 = self.tokenizer.decode(output_fp32[0], skip_special_tokens=True)
+    model.generate(**tokenized_inputs, max_new_tokens=max_tokens)
 
-        # Mixed precision (fp16)
-        model_fp16 = AutoModelForCausalLM.from_pretrained(self.model_name, torch_dtype=torch.float16).to(self.device)
-        output_fp16 = model_fp16.generate(**inputs, max_new_tokens=max_tokens)
-        text_fp16 = self.tokenizer.decode(output_fp16[0], skip_special_tokens=True)
+    end_time = time.time()
+    power_end = track_power()
 
-        print(f"Full Precision (fp32) Output:\n{text_fp32}")
-        print(f"Mixed Precision (fp16) Output:\n{text_fp16}")
+    latency = end_time - start_time
+    total_tokens = max_tokens * batch_size
+    power_consumed = (power_end - power_start) * latency
+    energy_per_token = power_consumed / total_tokens if total_tokens > 0 else float("inf")
 
-        similarity = text_fp32 == text_fp16
-        print(f"Outputs Match: {similarity}")
-        return similarity
+    print(f"Power Consumption: {power_consumed:.2f} W | Energy per Token: {energy_per_token:.4f} W/token")
+    return power_consumed, energy_per_token
 
-    def memory_by_sequence_length(self, base_prompt: str, max_tokens: int = 50, max_length: int = 1024) -> None:
-        """
-        Evaluate memory usage as sequence length increases.
 
-        Args:
-            base_prompt (str): Base string to repeat for increasing sequence length.
-            max_tokens (int): Maximum number of tokens to generate.
-            max_length (int): Maximum sequence length to test.
-        """
-        print("Memory Usage by Sequence Length:")
-        for seq_length in [128, 256, 512, max_length]:
-            prompt = base_prompt * (seq_length // len(base_prompt))
-            inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True).to(self.device)
+def compare_precision_accuracy(
+    model_name: str, prompt: str, max_tokens: int = 50
+) -> bool:
+    """
+    Compare outputs for fp32 and fp16 precision to test output integrity.
 
-            torch.cuda.reset_peak_memory_stats()
-            self.model.generate(**inputs, max_new_tokens=max_tokens)
-            peak_memory = torch.cuda.max_memory_allocated() / (1024 ** 2)  # Convert to MB
+    Args:
+        model_name (str): The Hugging Face model name or path.
+        prompt (str): The input prompt for the model.
+        max_tokens (int): The maximum number of tokens to generate.
 
-            print(f"Sequence Length: {seq_length} | Peak Memory Usage: {peak_memory:.2f} MB")
+    Returns:
+        bool: Whether the outputs for fp32 and fp16 are identical.
+    """
+    device = get_device()
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-"""
-Usage example:
+    # Full precision (fp32)
+    model_fp32 = AutoModelForCausalLM.from_pretrained(model_name).to(device)
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    output_fp32 = model_fp32.generate(**inputs, max_new_tokens=max_tokens)
+    text_fp32 = tokenizer.decode(output_fp32[0], skip_special_tokens=True)
 
-if __name__ == "__main__":
-    model_name = "meta-llama/Llama-2-7b-hf"  # Example model
-    prompt = "Explain the impact of climate change on global agriculture."
-    base_prompt = "Climate change affects agriculture in multiple ways. "
+    # Mixed precision (fp16)
+    model_fp16 = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16).to(device)
+    output_fp16 = model_fp16.generate(**inputs, max_new_tokens=max_tokens)
+    text_fp16 = tokenizer.decode(output_fp16[0], skip_special_tokens=True)
 
-    tester = LLMPerformanceTester(model_name)
+    print(f"Full Precision (fp32) Output:\n{text_fp32}")
+    print(f"Mixed Precision (fp16) Output:\n{text_fp16}")
 
-    # Latency and token throughput
-    tester.evaluate_latency_throughput(prompt, max_tokens=50, batch_size=4)
+    return text_fp32 == text_fp16
 
-    # Power efficiency and energy per token
-    tester.evaluate_power_efficiency(prompt, max_tokens=50, batch_size=4)
 
-    # Compare fp32 and fp16 outputs
-    tester.compare_precision_accuracy(prompt, max_tokens=50)
+def memory_by_sequence_length(
+    model: Any, tokenizer: Any, prompt: str, max_tokens: int = 50, max_length: int = 1024
+) -> Dict[int, float]:
+    """
+    Measure memory usage as sequence length increases.
 
-    # Memory by sequence length
-    tester.memory_by_sequence_length(base_prompt, max_tokens=50, max_length=1024)
-"""
+    Args:
+        model (Any): The Hugging Face model instance.
+        tokenizer (Any): The Hugging Face tokenizer instance.
+        prompt (str): The input prompt for evaluation.
+        max_tokens (int): The maximum number of tokens to generate.
+        max_length (int): The maximum sequence length.
+
+    Returns:
+        Dict[int, float]: Memory usage (in MB) for different sequence lengths.
+    """
+    device = get_device()
+    model = model.to(device)
+    memory_results = {}
+
+    for seq_length in [128, 256, 512, max_length]:
+        prompt_repeated = prompt * (seq_length // len(prompt))
+        inputs = tokenizer(prompt_repeated, return_tensors="pt", truncation=True).to(device)
+
+        torch.cuda.reset_peak_memory_stats() if device.type == "cuda" else None
+        model.generate(**inputs, max_new_tokens=max_tokens)
+        peak_memory = torch.cuda.max_memory_allocated() / (1024 ** 2) if device.type == "cuda" else 0.0
+        memory_results[seq_length] = peak_memory
+
+    return memory_results
