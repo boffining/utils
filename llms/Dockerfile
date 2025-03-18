@@ -7,6 +7,11 @@ WORKDIR /app
 # Copy the requirements file into the container
 COPY requirements.txt .
 
+# Install CA certificates AND upgrade certifi
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir --upgrade certifi
+
 # Install the required Python packages
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -16,5 +21,9 @@ COPY metrics.py .
 COPY test.py .
 COPY main.py .
 
+# Set Hugging Face Hub environment variables (for authentication)
+# These will be passed in when you run the container.
+ENV HF_TOKEN=$HF_TOKEN
+
 # Run the unit tests using pytest.
-CMD ["pytest"]
+CMD ["pytest", "main.py"]
