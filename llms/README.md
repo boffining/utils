@@ -68,3 +68,77 @@ from metrics import calculate_perplexity
 probabilities = [0.2, 0.4, 0.1, 0.3]
 perplexity = calculate_perplexity(probabilities)
 print(f"Perplexity: {perplexity}")
+```
+
+
+
+# LLM Evaluation Tool
+
+This tool evaluates the performance of Large Language Models (LLMs) within a Docker container. It measures latency, throughput, power efficiency (on CUDA devices), memory usage, and precision, and provides detailed logging.
+
+## Prerequisites
+
+*   Docker installed and running.
+*   (Optional) An LLM model in a local directory for offline use. This model must be in the Hugging Face Transformers format (i.e., have a `config.json`, `pytorch_model.bin` or similar, and tokenizer files).
+
+## Files
+
+*   `Dockerfile`: Builds the Docker image.
+*   `requirements.txt`: Lists Python dependencies.
+*   `utils.py`: Utility functions (device detection, hardware info).
+*   `metrics.py`: Core metric calculation functions (latency, throughput, power, etc.).
+*   `metric_tracker.py`: Decorator for automatic metric tracking and logging.
+*   `test.py`: Unit tests (using `pytest`).
+*   `setup.sh`: Builds the Docker image and runs initial tests.
+*   `shutdown.sh`: (Optional) Cleanup script.
+*   `main.py`: Example script for running evaluations.
+
+## Setup
+
+1.  **Directory Structure:** Place all the provided files (`Dockerfile`, `requirements.txt`, `utils.py`, `metrics.py`, `metric_tracker.py`, `test.py`, `setup.sh`, `shutdown.sh`, `main.py`) in the same directory.
+
+2.  **(Optional) Local Model:** If you want to evaluate a *local* model, create a subdirectory (e.g., `target_model`) and place your model files *inside* that subdirectory.  The directory structure should look like this:
+
+    ```
+    your_project_directory/
+    ├── Dockerfile
+    ├── requirements.txt
+    ├── utils.py
+    ├── metrics.py
+    ├── metric_tracker.py
+    ├── test.py
+    ├── setup.sh
+    ├── shutdown.sh
+    ├── main.py
+    └── target_model/       <-- Your local model directory
+        ├── config.json
+        ├── pytorch_model.bin  (or similar model files)
+        ├── tokenizer.json
+        └── ... other tokenizer files ...
+    ```
+
+    You can create the `target_model` directory and download a model (e.g., `sshleifer/tiny-gpt2`) like this (replace with your desired model):
+
+    ```bash
+    mkdir my_model
+    transformers-cli download sshleifer/tiny-gpt2 --local-dir ./my_model --local-dir-use-symlinks False
+    ```
+    The `--local-dir-use-symlinks False` flag is important for Docker volume mounting.
+
+3.  **Build and Test:** Run the `setup.sh` script:
+
+    ```bash
+    chmod +x setup.sh  # Make the script executable (if needed)
+    ./setup.sh
+    ```
+
+    This script builds the Docker image (tagged as `llm-eval-test`) and then runs the unit tests *inside* a container to ensure that the base environment (Python, libraries) is set up correctly.  If any tests fail, you'll see error messages in the terminal.
+
+## Usage
+
+### Running with a Local Model (Offline)
+
+Use the `-v` option with `docker run` to mount your local model directory into the container at `/app/target_model`.  This makes the model available to the scripts inside the container.
+
+```bash
+docker run -v /path/to/your/target_model:/app/target_model llm-eval-test python main.py
