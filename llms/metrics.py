@@ -1,373 +1,209 @@
-"""
-metrics.py
-
-This module contains implementations and utilities to evaluate language models (LLMs) based on various
-metrics, including BLEU, ROUGE, METEOR, BERTScore, and others.
-
-The metrics are demonstrated with the Hugging Face model "Mistral" as an example.
-
-Requirements:
-- transformers
-- torch
-- datasets
-- bert_score
-- nltk
-
-Install dependencies:
-    pip install transformers torch datasets bert-score nltk
-
-"""
-
-from typing import List, Dict, Tuple
-#from datasets import load_metric
-from evaluate import load as load_metric
+import time
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from bert_score import score
-import numpy as np
-import math
+from typing import Tuple, Dict, List
+from transformers import PreTrainedModel, PreTrainedTokenizer, AutoTokenizer, AutoModelForCausalLM
+from utils import get_device, NVML_AVAILABLE  # Import from utils.py
 
-# Example Hugging Face model for evaluation
-MODEL_NAME = "mistralai/Mistral-7B-v0.1"
+if NVML_AVAILABLE:
+    from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetPowerUsage
 
-def calculate_bleu(predictions: List[str], references: List[List[str]]) -> Dict:
+
+def evaluate_latency_throughput(
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizer,
+    prompt: str,
+    max_tokens: int = 50,
+    batch_size: int = 1
+) -> Tuple[torch.Tensor, float, float, float]:
     """
-    Calculate BLEU score for the model's predictions.
+    Evaluates the latency and throughput of a given Hugging Face model.
 
     Args:
-        predictions (List[str]): A list of predicted texts from the model.
-        references (List[List[str]]): A list of reference texts (ground truth).
+        model (PreTrainedModel): The Hugging Face model instance.
+        tokenizer (PreTrainedTokenizer): The Hugging Face tokenizer instance.
+        prompt (str): The input prompt for evaluation.
+        max_tokens (int): The maximum number of tokens to generate. Defaults to 50.
+        batch_size (int): The batch size for evaluation. Defaults to 1.
 
     Returns:
-        Dict: BLEU score and additional metrics.
-
-    Resource:
-        https://github.com/huggingface/evaluate
+        Tuple[torch.Tensor, float, float, float]: A tuple containing the model's outputs,
+                                                latency (in seconds),
+                                                throughput (responses/second), and
+                                                token throughput (tokens/second).
     """
-    bleu_metric = load_metric("bleu")
-    bleu_metric.add_batch(predictions=predictions, references=references)
-    result = bleu_metric.compute()
-    return result
+    device = get_device()
+    model = model.to(device)  # Move model to the correct device
 
-def calculate_rouge(predictions: List[str], references: List[str]) -> Dict:
+    # Prepare inputs
+    inputs = [prompt] * batch_size
+    tokenized_inputs = tokenizer(inputs, return_tensors="pt", padding=True).to(device)
+
+    # Warm-up
+    print("Warming up...")
+    start_warmup = time.time()
+    model.generate(**tokenized_inputs, max_new_tokens=max_tokens)
+    end_warmup = time.time()
+    warmup_time = end_warmup - start_warmup
+    print(f"Warm-up Time: {warmup_time:.2f}s")
+
+    # Measure latency and throughput
+    print("Measuring latency and throughput...")
+    start_time = time.time()
+    outputs = model.generate(**tokenized_inputs, max_new_tokens=max_tokens)
+    end_time = time.time()
+
+    latency = end_time - start_time
+    throughput = batch_size / latency
+    total_tokens = max_tokens * batch_size  # Correct calculation for generated tokens.
+    token_throughput = total_tokens / latency
+    print(f"Latency: {latency:.2f}s | Throughput: {throughput:.2f} responses/sec | Token Throughput: {token_throughput:.2f} tokens/sec")
+    return outputs, latency, throughput, token_throughput
+
+
+def evaluate_power_efficiency(
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizer,
+    prompt: str,
+    max_tokens: int = 50,
+    batch_size: int = 1
+) -> Tuple[float, float]:
     """
-    Calculate ROUGE score for the model's predictions.
+    Evaluates the power efficiency of a given Hugging Face model (CUDA devices only).
 
     Args:
-        predictions (List[str]): A list of predicted texts from the model.
-        references (List[str]): A list of reference texts (ground truth).
+        model (PreTrainedModel): The Hugging Face model instance.
+        tokenizer (PreTrainedTokenizer): The Hugging Face tokenizer instance.
+        prompt (str): The input prompt for evaluation.
+        max_tokens (int): The maximum number of tokens to generate. Defaults to 50.
+        batch_size (int): The batch size for evaluation. Defaults to 1.
 
     Returns:
-        Dict: ROUGE scores.
-
-    Resource:
-        https://github.com/huggingface/evaluate
+        Tuple[float, float]: A tuple containing the total power consumed (in Watts)
+                            and energy per token (in Watts/token).  Returns (0.0, 0.0)
+                            if not on a CUDA device or if pynvml is not available.
     """
-    rouge_metric = load_metric("rouge")
-    rouge_metric.add_batch(predictions=predictions, references=references)
-    result = rouge_metric.compute()
-    return result
+    device = get_device()
+    if device.type != "cuda" or not NVML_AVAILABLE:
+        print("Power efficiency evaluation is only supported on CUDA devices with pynvml installed.")
+        return 0.0, 0.0
 
-def calculate_meteor(predictions: List[str], references: List[str]) -> Dict:
+    nvmlInit()
+    gpu_handle = nvmlDeviceGetHandleByIndex(0)
+
+    def track_power() -> float:
+        """Tracks GPU power consumption in watts."""
+        return nvmlDeviceGetPowerUsage(gpu_handle) / 1000.0  # Convert milliwatts to watts
+
+    model = model.to(device)
+    inputs = [prompt] * batch_size
+    tokenized_inputs = tokenizer(inputs, return_tensors="pt", padding=True).to(device)
+
+    # Warm-up
+    print("Warming up...")
+    model.generate(**tokenized_inputs, max_new_tokens=max_tokens)
+
+    # Measure power and efficiency
+    print("Measuring power efficiency...")
+    power_start = track_power()
+    start_time = time.time()
+
+    model.generate(**tokenized_inputs, max_new_tokens=max_tokens)
+
+    end_time = time.time()
+    power_end = track_power()
+
+    latency = end_time - start_time
+    total_tokens = max_tokens * batch_size
+    power_consumed = (power_end + power_start)/2 * latency  # More accurate: average power during generation
+
+    # Avoid division by zero
+    energy_per_token = power_consumed / total_tokens if total_tokens > 0 else 0.0
+
+    print(f"Power Consumption: {power_consumed:.2f} W | Energy per Token: {energy_per_token:.6f} W/token")
+    return power_consumed, energy_per_token
+
+
+def compare_precision_accuracy(
+    model_name: str,
+    prompt: str,
+    max_tokens: int = 50
+) -> bool:
     """
-    Calculate METEOR score for the model's predictions.
+    Compares outputs for fp32 and fp16 precision to assess output integrity.
 
     Args:
-        predictions (List[str]): A list of predicted texts from the model.
-        references (List[str]): A list of reference texts (ground truth).
+        model_name (str): The Hugging Face model name or path.
+        prompt (str): The input prompt for the model.
+        max_tokens (int): The maximum number of tokens to generate. Defaults to 50.
 
     Returns:
-        Dict: METEOR score.
-
-    Resource:
-        https://github.com/huggingface/evaluate
+        bool: True if the outputs for fp32 and fp16 are identical, False otherwise.
     """
-    meteor_metric = load_metric("meteor")
-    meteor_metric.add_batch(predictions=predictions, references=references)
-    result = meteor_metric.compute()
-    return result
+    device = get_device()
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-def calculate_bert_score(predictions: List[str], references: List[str]) -> Dict:
+    # Full precision (fp32)
+    model_fp32 = AutoModelForCausalLM.from_pretrained(model_name).to(device)
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    output_fp32 = model_fp32.generate(**inputs, max_new_tokens=max_tokens)
+    text_fp32 = tokenizer.decode(output_fp32[0], skip_special_tokens=True)
+
+    # Mixed precision (fp16) - Use autocast for best practice
+    model_fp16 = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16).to(device)
+
+    with torch.cuda.amp.autocast():  # Use autocast for mixed precision
+        output_fp16 = model_fp16.generate(**inputs, max_new_tokens=max_tokens)
+    text_fp16 = tokenizer.decode(output_fp16[0], skip_special_tokens=True)
+
+
+    print(f"Full Precision (fp32) Output:\n{text_fp32}")
+    print(f"Mixed Precision (fp16) Output:\n{text_fp16}")
+
+    return text_fp32 == text_fp16
+
+
+
+def memory_by_sequence_length(
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizer,
+    prompt: str,
+    max_tokens: int = 50,
+    max_length: int = 1024
+) -> Dict[int, float]:
     """
-    Calculate BERTScore for the model's predictions.
+    Measures memory usage as the input sequence length increases.
 
     Args:
-        predictions (List[str]): A list of predicted texts from the model.
-        references (List[str]): A list of reference texts (ground truth).
+        model (PreTrainedModel): The Hugging Face model instance.
+        tokenizer (PreTrainedTokenizer): The Hugging Face tokenizer instance.
+        prompt (str): The input prompt for evaluation.
+        max_tokens (int): The maximum number of tokens to generate. Defaults to 50.
+        max_length (int): The maximum sequence length to test. Defaults to 1024.
 
     Returns:
-        Dict: Precision, Recall, and F1 scores.
-
-    Resource:
-        https://github.com/Tiiiger/bert_score
+        Dict[int, float]: A dictionary mapping sequence lengths (int) to
+                         peak memory usage (in MB).  Returns 0.0 for non-CUDA devices.
     """
-    P, R, F1 = score(predictions, references, lang="en", verbose=True)
-    return {"precision": P.mean().item(), "recall": R.mean().item(), "f1": F1.mean().item()}
-
-def calculate_ragas_score(predictions: List[str], references: List[str]) -> Dict:
-    """
-    Calculate RAGAS (Retrieval-Augmented Generation Answer Score).
-
-    Args:
-        predictions (List[str]): A list of predicted texts from the model.
-        references (List[str]): A list of reference texts (ground truth).
-
-    Returns:
-        Dict: RAGAS score.
-
-    Resource:
-        https://github.com/explodinggradients/ragas
-    """
-    from ragas import evaluate
-    ragas_result = evaluate(predictions, references)
-    return {"ragas_score": ragas_result["score"]}
-
-def calculate_helm_score(predictions: List[str], references: List[str]) -> Dict:
-    """
-    Calculate HELM (Holistic Evaluation of Language Models) metrics.
-
-    Args:
-        predictions (List[str]): A list of predicted texts from the model.
-        references (List[str]): A list of reference texts (ground truth).
-
-    Returns:
-        Dict: HELM score.
-
-    Resource:
-        https://crfm.stanford.edu/helm/latest/
-    """
-    # Placeholder for actual HELM evaluation framework integration
-    helm_score = np.mean([len(pred) / max(len(ref), 1) for pred, ref in zip(predictions, references)])
-    return {"helm_score": helm_score}
-
-def calculate_gpt_score(predictions: List[str], references: List[str]) -> Dict:
-    """
-    Calculate GPT-Score for text similarity.
-
-    Args:
-        predictions (List[str]): A list of predicted texts from the model.
-        references (List[str]): A list of reference texts (ground truth).
-
-    Returns:
-        Dict: GPT-Score values.
-
-    Resource:
-        https://github.com/IntelLabs/gpt-score
-    """
-    from gpt_score import GPTScorer
-    scorer = GPTScorer()
-    scores = scorer.score(predictions, references)
-    return {"gpt_score": np.mean(scores)}
-
-def calculate_forgetting_rate(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, prompts: List[str]) -> float:
-    """
-    Calculate Forgetting Rate of the model over repeated evaluations.
-
-    Args:
-        model (AutoModelForCausalLM): The language model to test.
-        tokenizer (AutoTokenizer): Tokenizer associated with the model.
-        prompts (List[str]): List of input prompts.
-
-    Returns:
-        float: Forgetting rate as a percentage.
-
-    Resource:
-        https://arxiv.org/abs/2205.12647
-    """
-    baseline_results = []
-    repeated_results = []
-
-    for prompt in prompts:
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        baseline_output = model.generate(**inputs)
-        repeated_output = model.generate(**inputs)
-
-        baseline_results.append(tokenizer.decode(baseline_output[0], skip_special_tokens=True))
-        repeated_results.append(tokenizer.decode(repeated_output[0], skip_special_tokens=True))
-
-    differences = [1 if b != r else 0 for b, r in zip(baseline_results, repeated_results)]
-    forgetting_rate = sum(differences) / len(prompts) * 100
-    return forgetting_rate
-
-# def calculate_brevity_score(predictions: List[str], references: List[str]) -> Dict:
-#     """
-#     Calculate Brevity Score to evaluate concise text generation.
-
-#     Args:
-#         predictions (List[str]): A list of predicted texts from the model.
-#         references (List[str]): A list of reference texts (ground truth).
-
-#     Returns:
-#         Dict: Brevity score.
-
-#     Resource:
-#         https://arxiv.org/pdf/1904.09675.pdf
-#     """
-#     brevity_ratios = [len(pred.split()) / max(len(ref.split()), 1) for pred, ref in zip(predictions, references)]
-#     brevity_score = np.mean([min(1.0, ratio) for ratio in brevity_ratios])
-#     return {"brevity_score": brevity_score}
-
-def calculate_brevity_score(reference: str, generated: str) -> float:
-    """
-    Calculate the brevity score for the generated text compared to the reference.
-
-    Args:
-        reference (str): The reference text.
-        generated (str): The generated text.
-
-    Returns:
-        float: The brevity score (closer to 1 is better).
-        
-    Resource:
-        https://arxiv.org/pdf/1904.09675.pdf
-    """
-    # Tokenize the reference and generated text
-    reference_length = len(reference.split())
-    generated_length = len(generated.split())
-
-    if generated_length == 0:
-        raise ValueError("Generated text has zero tokens, cannot calculate brevity score.")
-
-    # Brevity penalty: e^1 - (reference_length / generated_length) if generated text is shorter
-    brevity_penalty = 1.0
-    if generated_length < reference_length:
-        brevity_penalty = reference_length / generated_length
-
-    brevity_score = brevity_penalty
-    return brevity_score
-
-def calculate_perplexity(probabilities: List[float]) -> float:
-    """
-    Calculate the perplexity of a model's output.
-
-    Args:
-        probabilities (List[float]): A list of probabilities for each token in the sequence.
-
-    Returns:
-        float: The perplexity score.
-
-    Reference:
-        - https://huggingface.co/docs/evaluate/metrics/perplexity
-    """
-    cross_entropy = -np.mean(np.log(probabilities))
-    perplexity = np.exp(cross_entropy)
-    return perplexity
-
-
-def calculate_f1_score(precision: float, recall: float) -> float:
-    """
-    Calculate the F1 score given precision and recall.
-
-    Args:
-        precision (float): Precision of the predictions.
-        recall (float): Recall of the predictions.
-
-    Returns:
-        float: The F1 score.
-
-    Reference:
-        - https://huggingface.co/docs/evaluate/metrics/f1
-    """
-    if precision + recall == 0:
-        return 0.0
-    return 2 * (precision * recall) / (precision + recall)
-
-
-def calculate_precision_recall(true_positive: int, false_positive: int, false_negative: int) -> Dict[str, float]:
-    """
-    Calculate precision and recall.
-
-    Args:
-        true_positive (int): Number of true positive cases.
-        false_positive (int): Number of false positive cases.
-        false_negative (int): Number of false negative cases.
-
-    Returns:
-        Dict[str, float]: A dictionary containing precision and recall scores.
-
-    Reference:
-        - https://huggingface.co/docs/evaluate/metrics/precision
-    """
-    precision = true_positive / (true_positive + false_positive) if (true_positive + false_positive) > 0 else 0.0
-    recall = true_positive / (true_positive + false_negative) if (true_positive + false_negative) > 0 else 0.0
-    return {"precision": precision, "recall": recall}
-
-
-def calculate_mean_reciprocal_rank(ranks: List[int]) -> float:
-    """
-    Calculate the Mean Reciprocal Rank (MRR).
-
-    Args:
-        ranks (List[int]): A list of ranks for the first relevant result in each query.
-
-    Returns:
-        float: The MRR score.
-
-    Reference:
-        - https://huggingface.co/docs/evaluate/metrics/mrr
-    """
-    reciprocal_ranks = [1 / rank if rank > 0 else 0 for rank in ranks]
-    return np.mean(reciprocal_ranks)
-
-
-def calculate_mean_average_precision(relevance_scores: List[List[int]]) -> float:
-    """
-    Calculate Mean Average Precision (MAP).
-
-    Args:
-        relevance_scores (List[List[int]]): A list of binary relevance scores for each query's retrieved documents.
-
-    Returns:
-        float: The MAP score.
-
-    Reference:
-        - https://huggingface.co/docs/evaluate/metrics/map
-    """
-    average_precisions = []
-    for scores in relevance_scores:
-        precision_at_k = [
-            sum(scores[:k + 1]) / (k + 1) for k in range(len(scores)) if scores[k] == 1
-        ]
-        if precision_at_k:
-            average_precisions.append(np.mean(precision_at_k))
-    return np.mean(average_precisions) if average_precisions else 0.0
-
-"""
-Usage Example with Hugging Face LLM Mistral:
-
-if __name__ == "__main__":
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Sample inputs
-    predictions = ["Climate change is a global challenge that requires..."]
-    references = [["Climate change is a pressing issue affecting..."]]
-
-    # BLEU
-    print("BLEU Score:", calculate_bleu(predictions, references))
-
-    # ROUGE
-    print("ROUGE Score:", calculate_rouge(predictions, [r[0] for r in references]))
-
-    # METEOR
-    print("METEOR Score:", calculate_meteor(predictions, [r[0] for r in references]))
-
-    # BERTScore
-    print("BERTScore:", calculate_bert_score(predictions, [r[0] for r in references]))
-
-    # RAGAS
-    print("RAGAS Score:", calculate_ragas_score(predictions, [r[0] for r in references]))
-
-    # HELM
-    print("HELM Score:", calculate_helm_score(predictions, [r[0] for r in references]))
-
-    # GPT-Score
-    print("GPT-Score:", calculate_gpt_score(predictions, [r[0] for r in references]))
-
-    # Forgetting Rate
-    prompts = ["What is climate change?", "Explain photosynthesis."]
-    print("Forgetting Rate:", calculate_forgetting_rate(model, tokenizer, prompts))
-
-    # Brevity Score
-    print("Brevity Score:", calculate_brevity_score(predictions, [r[0] for r in references]))
-"""
+    device = get_device()
+    model = model.to(device)
+    memory_results: Dict[int, float] = {}
+
+    for seq_length in [128, 256, 512, max_length]:
+        print(f"Measuring memory usage for sequence length: {seq_length}")
+        # Create a prompt that, when tokenized, will be approximately seq_length long
+        prompt_repeated = prompt * (seq_length // len(tokenizer.encode(prompt)) + 1)
+        inputs = tokenizer(prompt_repeated, return_tensors="pt", truncation=True, max_length=seq_length).to(device)
+
+
+        # For CUDA, use built-in memory tracking.  For others, report 0.
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+            model.generate(**inputs, max_new_tokens=max_tokens)
+            peak_memory = torch.cuda.max_memory_allocated() / (1024 ** 2)  # Convert bytes to MB
+        else:
+            peak_memory = 0.0  # No memory tracking for non-CUDA devices
+
+        memory_results[seq_length] = peak_memory
+        print(f"Sequence Length: {seq_length}, Peak Memory: {peak_memory:.2f} MB")
+
+    return memory_results
