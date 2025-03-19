@@ -1,29 +1,24 @@
-# Use an official Python runtime as the base image
 FROM python:3.9-slim
 
-# Set the working directory inside the container
 WORKDIR /app
 
-# Copy the requirements file into the container
 COPY requirements.txt .
 
-# Install CA certificates AND upgrade certifi
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl iputils-ping && \
     pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir --upgrade certifi
 
-# Install the required Python packages
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the application code into the container
 COPY utils.py .
 COPY metrics.py .
 COPY test.py .
 COPY main.py .
 
 # Set Hugging Face Hub environment variables (for authentication)
-# These will be passed in when you run the container.
 ENV HF_TOKEN=$HF_TOKEN
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 # Run the unit tests using pytest.
 CMD ["pytest", "main.py"]
