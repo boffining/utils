@@ -6,6 +6,7 @@ import utils
 import metrics
 import functools
 import logging
+import sys
 
 
 def log_environment_and_model_info(model: PreTrainedModel, tokenizer: PreTrainedTokenizer, logger: logging.Logger):
@@ -35,7 +36,7 @@ def log_environment_and_model_info(model: PreTrainedModel, tokenizer: PreTrained
         logger.info("  (Some model details could not be accessed)")
 
 
-def evaluate_llm(log_file: str = "llm_evaluation.log") -> Callable:
+def evaluate_llm(log_file) -> Callable:
     """
     Decorator to evaluate LLM performance and log metrics.
 
@@ -51,13 +52,18 @@ def evaluate_llm(log_file: str = "llm_evaluation.log") -> Callable:
         def wrapper(model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prompt: str, *args, **kwargs) -> Any:
 
             # Configure logging
-            logging.basicConfig(
-                filename=log_file,
-                filemode='a',  # Append to the log file
-                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                level=logging.INFO
-            )
+#             logging.basicConfig(
+#                 filename=log_file,
+#                 filemode='a',  # Append to the log file
+#                 format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+#                 level=logging.INFO
+#             )
             logger = logging.getLogger("LLMEvaluator")
+            ch = logging.StreamHandler()
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            ch.setFormatter(formatter)
+            logger.addHandler(ch)
+    
             logger.info("=" * 30)
 
             log_environment_and_model_info(model, tokenizer, logger)
