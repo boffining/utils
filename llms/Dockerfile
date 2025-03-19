@@ -3,10 +3,10 @@ FROM python:3.9-slim
 WORKDIR /app
 
 COPY requirements.txt .
+COPY wheelhouse /tmp/wheelhouse
 
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl iputils-ping && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir --upgrade certifi
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git && \
+    pip install --no-cache-dir --no-index --find-links=/tmp/wheelhouse -r requirements.txt
 
 COPY utils.py .
 COPY metrics.py .
