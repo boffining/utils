@@ -1,0 +1,4 @@
+huggingface-cli download gpt2 --local-dir offline_model --local-dir-use-symlinks False
+
+
+pip download -r requirements.txt -d wheelhouse --platform manylinux2014_x86_64 --only-binary=:all: --python-version 39
